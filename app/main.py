@@ -1,13 +1,19 @@
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 
-app = FastAPI(title="GHDL Execution Service")
+from . import docker_runner
+from .models import SimulationRequest, SimulationResult
 
 
-class SimulationRequest(BaseModel):
-    filename: str = Field(min_length=1, max_length=100)
-    vhdl_source: str = Field(min_length=1)
+@asynccontextmanager
+async def lifespan(_app):
+    # Remove containers and job folders left over from a previous run.
+    docker_runner.cleanup_stale_jobs()
+    yield
+
+
+app = FastAPI(title="GHDL Execution Service", lifespan=lifespan)
 
 
 @app.get("/")
@@ -17,26 +23,31 @@ def home():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", **docker_runner.docker_status()}
 
 
-@app.post("/simulate")
+# A plain "def" (not "async def") so FastAPI runs each job in a worker
+# thread and one slow simulation doesn't block other requests.
+@app.post("/simulate", response_model=SimulationResult)
 def simulate(request: SimulationRequest):
-    if not request.filename.lower().endswith((".vhd", ".vhdl")):
-        raise HTTPException(
-            status_code=400,
-            detail="Filename must end in .vhd or .vhdl",
-        )
+    result = docker_runner.run_job(
+        files=request.files,
+        top=request.top,
+        stop_time=request.stop_time,
+    )
 
-    if not request.vhdl_source.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="VHDL source cannot be empty",
-        )
+    # The request itself was wrong (bad file name, bad stop time...).
+    if result["error"] == "validation_error":
+        raise HTTPException(status_code=400, detail=result["message"])
 
-    return {
-        "status": "accepted",
-        "stage": "request_received",
-        "filename": request.filename,
-        "message": "Request accepted. GHDL simulation is not implemented yet.",
-    }
+    # Docker isn't running or the GHDL image isn't built: our fault, not theirs.
+    if result["error"] == "internal_error":
+        raise HTTPException(status_code=503, detail=result["message"])
+
+    # The VCD is plain text, so send it as a string inside the JSON.
+    vcd = result["vcd"]
+    result["vcd"] = vcd.decode("utf-8", errors="replace") if vcd else None
+
+    # VHDL errors, timeouts and successes all come back as 200 with
+    # "status" and "error" saying what happened.
+    return result
