@@ -7,3 +7,5 @@ __pycache__/
 .env
 .vs/
 .DS_Store
+jobs/
+demo_output/
