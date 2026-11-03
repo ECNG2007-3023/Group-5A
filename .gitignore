@@ -6,5 +6,6 @@ __pycache__/
 .pytest_cache/
 .env
 .vs/
+.DS_Store
 jobs/
 demo_output/
