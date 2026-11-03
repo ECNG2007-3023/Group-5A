@@ -91,3 +91,19 @@ def test_docker_problem_is_503(client, monkeypatch):
 def test_missing_fields_rejected(client):
     assert client.post("/simulate", json={"top": "x"}).status_code == 422
     assert client.post("/simulate", json={"files": [], "top": "x"}).status_code == 422
+
+
+def test_milestone2_single_file_form_still_works(client, monkeypatch):
+    calls = use_fake_run_job(monkeypatch, fake_result())
+    r = client.post("/simulate", json={"filename": "valid_test.vhd",
+                                       "vhdl_source": "entity valid_test is end;",
+                                       "top_entity": "valid_test"})
+    assert r.status_code == 200
+    assert calls[0]["top"] == "valid_test"
+    assert calls[0]["files"][0].name == "valid_test.vhd"
+    assert calls[0]["files"][0].content == "entity valid_test is end;"
+
+
+def test_neither_form_rejected(client):
+    r = client.post("/simulate", json={"filename": "a.vhd"})
+    assert r.status_code == 422
