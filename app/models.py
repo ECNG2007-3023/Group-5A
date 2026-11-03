@@ -52,7 +52,7 @@ class StageResult(BaseModel):
 
 class SimulationResult(BaseModel):
     """The result of a job, as returned by POST /simulate."""
-    job_id: str
+    job_id: Optional[str]  # None only when the request body itself was invalid
     status: str            # "success" or "failed"
     stage: str             # last stage reached, or "done"
     error: Optional[str]   # e.g. "analysis_error", "timeout"; None on success
