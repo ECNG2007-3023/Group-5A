@@ -28,6 +28,9 @@ CPU_LIMIT = _env("P5A_CPU_LIMIT", 1.0, float)            # number of CPUs
 PIDS_LIMIT = _env("P5A_PIDS_LIMIT", 64, int)             # stops fork bombs
 TMPFS_SIZE = _env("P5A_TMPFS_SIZE", "16m")               # writable /tmp size
 
+# How many jobs may run at once; extra requests wait for a free slot.
+MAX_CONCURRENT_JOBS = _env("P5A_MAX_CONCURRENT_JOBS", 4, int)
+
 # Request limits.
 MAX_FILES = _env("P5A_MAX_FILES", 20, int)
 MAX_FILE_BYTES = _env("P5A_MAX_FILE_BYTES", 200_000, int)
@@ -43,3 +46,8 @@ JOB_TTL_S = _env("P5A_JOB_TTL_S", 3600, int)
 
 # Label put on every job container so leftovers can be found and removed.
 CONTAINER_LABEL = "p5a.job"
+
+# Browser origins allowed to call the API (for the P6B front end), comma
+# separated, e.g. "http://localhost:5173,http://127.0.0.1:5173". "*" = any.
+CORS_ORIGINS = [o.strip() for o in _env("P5A_CORS_ORIGINS", "*").split(",")
+                if o.strip()]
