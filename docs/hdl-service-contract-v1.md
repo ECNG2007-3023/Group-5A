@@ -31,7 +31,7 @@ Interactive docs while the service runs: `http://127.0.0.1:8000/docs`
 
 | Field | Rule |
 | --- | --- |
-| `files` | 1 to 20 files. `name`: letters, digits, `_ . -`, ends in `.vhd` or `.vhdl`, no folders, no duplicates. `content`: not empty, at most 200,000 bytes |
+| `files` | 1 to 20 files, **in any order** (the service analyses them in dependency order: packages and entities before the files that use `work.<name>`). `name`: letters, digits, `_ . -`, ends in `.vhd` or `.vhdl`, no folders, no duplicates. `content`: not empty, at most 200,000 bytes |
 | `top` | The entity to elaborate and run (normally the testbench). A VHDL identifier |
 | `stop_time` | Optional, default `1us`. A number and unit: `fs ps ns us ms sec` |
 
@@ -64,7 +64,7 @@ these fields:
 | `status` | `success` or `failed` |
 | `stage` | Where the job stopped: `validation`, `analysis`, `elaboration`, `simulation`, `service`, or `done` on success |
 | `error` | `null` on success, otherwise one of the error codes below |
-| `stages` | One entry per stage that ran, in order, with GHDL's own output (file and line of the error) |
+| `stages` | One entry per stage that ran, in order, with GHDL's own output (file and line of the error). Output over 20,000 characters is cut in the middle, so both the start and the final error line are kept |
 | `vcd` | On success the VCD waveform as text, otherwise `null`. At most 5,000,000 bytes |
 
 ## Error codes and HTTP status
@@ -84,4 +84,16 @@ these fields:
 
 Each stage runs in a new container from image `p5a-ghdl`: no network,
 read-only root file system, non-root user, 256 MB memory (no swap), 1 CPU,
-64 processes, 10 s per stage. Limits are set in `app/config.py`.
+64 processes, 10 s per stage. At most 4 jobs run at once; further requests
+wait for a free slot, so clients should allow about 2 minutes per request.
+Limits are set in `app/config.py`.
+
+## For other teams (P5B, P6B)
+
+* Machine-readable description: [`docs/openapi.json`](openapi.json)
+  (regenerate with `python docker/export_openapi.py`).
+* Python client: [`clients/p5a_client.py`](../clients/p5a_client.py).
+* Browsers may call the API from another origin (CORS). Allowed origins are
+  set with `P5A_CORS_ORIGINS` (default `*`). `X-Job-Id` and
+  `Content-Disposition` are readable by the page.
+* P5B hand-off notes: [`docs/p5b-integration.md`](p5b-integration.md).

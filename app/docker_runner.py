@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 import shutil
 import stat
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -108,6 +109,55 @@ def validate_request(files, top, stop_time=None):
     return normalised, top, stop_time
 
 
+# ------------------------------------------------------- analysis order
+
+# GHDL analyses files in the order given, and a file that uses
+# "entity work.x" or "use work.pkg" fails if x/pkg is not analysed yet.
+# Clients (e.g. the P6B front end) should not need to know that, so the
+# files are put in dependency order before analysis.
+_COMMENT_RE = re.compile(r"--[^\n]*")
+_DEFINES_RE = re.compile(r"\b(?:entity|package)\s+([a-z]\w*)\s+is\b", re.I)
+_USES_RE = re.compile(r"\bwork\s*\.\s*([a-z]\w*)", re.I)
+_ARCH_OF_RE = re.compile(r"\barchitecture\s+\w+\s+of\s+([a-z]\w*)", re.I)
+_BODY_OF_RE = re.compile(r"\bpackage\s+body\s+([a-z]\w*)", re.I)
+
+
+def analysis_order(files):
+    """Return the (name, content) list sorted so every file comes after the
+    files defining the entities/packages it uses. Files with no dependency
+    between them keep the order they were sent in. If the dependencies loop,
+    the remaining files are left in their original order (GHDL then reports
+    the real problem)."""
+    defines, uses = [], []
+    for _, content in files:
+        code = _COMMENT_RE.sub("", content)
+        own = {m.lower() for m in _DEFINES_RE.findall(code)}
+        used = {m.lower() for m in _USES_RE.findall(code)}
+        used |= {m.lower() for m in _ARCH_OF_RE.findall(code)}
+        used |= {m.lower() for m in _BODY_OF_RE.findall(code)}
+        defines.append(own)
+        uses.append(used - own)
+
+    unit_file = {}
+    for i, own in enumerate(defines):
+        for unit in own:
+            unit_file.setdefault(unit, i)
+    needs = [{unit_file[u] for u in used if u in unit_file} - {i}
+             for i, used in enumerate(uses)]
+
+    ordered, done = [], set()
+    while len(ordered) < len(files):
+        ready = [i for i in range(len(files))
+                 if i not in done and needs[i] <= done]
+        if not ready:                                   # a loop: give up
+            ready = [i for i in range(len(files)) if i not in done]
+            ordered.extend(ready)
+            break
+        ordered.append(ready[0])
+        done.add(ready[0])
+    return [files[i] for i in ordered]
+
+
 # ------------------------------------------------------------- docker helpers
 
 _client = None
@@ -137,10 +187,18 @@ def docker_status(client=None):
 
 
 def _truncate(text, limit=None):
+    """Shorten very long GHDL output. Keeps the START and the END, because
+    the line that explains a failure (e.g. an assertion of severity failure)
+    is usually the last one, after thousands of report notes."""
     limit = limit or config.MAX_LOG_CHARS
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n... [output truncated, {len(text) - limit} more characters]"
+    head = limit // 2
+    tail = limit - head
+    cut = len(text) - limit
+    return (text[:head]
+            + f"\n... [output truncated, {cut} characters removed] ...\n"
+            + text[-tail:])
 
 
 def _std_flag():
@@ -242,6 +300,10 @@ def _remove_dir(path):
 
 # ------------------------------------------------------------------ main API
 
+# At most this many jobs use Docker at the same time; the rest wait their
+# turn. Without it, 40 requests at once could start 40 x 256 MB containers.
+_job_slots = threading.BoundedSemaphore(config.MAX_CONCURRENT_JOBS)
+
 STAGE_ERRORS = {
     "analysis": "analysis_error",
     "elaboration": "elaboration_error",
@@ -263,7 +325,15 @@ def run_job(files, top, stop_time=None, job_id=None, client=None,
         result.update(error="validation_error", message=str(e))
         return result
 
-    timeout_s = timeout_s or config.JOB_TIMEOUT_S
+    with _job_slots:
+        return _run_validated_job(result, files, top, stop_time, client,
+                                  timeout_s or config.JOB_TIMEOUT_S,
+                                  keep_job_dir)
+
+
+def _run_validated_job(result, files, top, stop_time, client, timeout_s,
+                       keep_job_dir):
+    job_id = result["job_id"]
     job_dir = None
     try:
         client = client or get_client()
@@ -271,7 +341,8 @@ def run_job(files, top, stop_time=None, job_id=None, client=None,
         std = _std_flag()
 
         plan = [
-            ("analysis", ["ghdl", "-a", *std, *[name for name, _ in files]]),
+            ("analysis", ["ghdl", "-a", *std,
+                          *[name for name, _ in analysis_order(files)]]),
             ("elaboration", ["ghdl", "-e", *std, top]),
             ("simulation", ["ghdl", "-r", *std, top,
                             f"--vcd={VCD_NAME}", f"--stop-time={stop_time}"]),

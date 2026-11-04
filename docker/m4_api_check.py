@@ -1,4 +1,4 @@
-"""Milestone 4 check: verify the running API with real HTTP requests.
+"""Milestone 4/5 check: verify the running API with real HTTP requests.
 
 Sends the course-style scenarios (success, VHDL errors, runaway job, bad
 requests) to POST /simulate and checks the status code, "status", "stage"
@@ -62,6 +62,14 @@ SCENARIOS = [
      {"files": [{"name": "runaway_tb.vhd", "content": RUNAWAY_TB}],
       "top": "runaway_tb", "stop_time": "1ms"},
      200, "failed", "simulation", "timeout", False),
+    ("M5: files sent testbench first",
+     {"files": [file("and_gate_tb.vhd"), file("and_gate.vhd")],
+      "top": "and_gate_tb", "stop_time": "100ns"},
+     200, "success", "done", None, True),
+    ("M5: memory hog is killed",
+     {"files": [file("mem_hog_tb.vhd")], "top": "mem_hog_tb",
+      "stop_time": "1sec"},
+     200, "failed", "simulation", "memory_limit", False),
     ("service still works after the runaway",
      {"files": [file("and_gate.vhd"), file("and_gate_tb.vhd")],
       "top": "and_gate_tb"},
