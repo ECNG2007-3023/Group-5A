@@ -37,6 +37,7 @@ import stat
 import threading
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import docker
@@ -44,9 +45,14 @@ import requests
 from docker.errors import DockerException, ImageNotFound, NotFound
 
 from . import config
+from .invariants import (check_inside, check_order_invariant, check_progress,
+                         check_result, check_same_files, check_stage_loop)
 
 # ---------------------------------------------------------------- validation
 
+# At most 100 characters in total, the same as the API model (models.py) and
+# P5B. Found by boundary value testing: the pattern alone allowed 100 + ".vhd".
+MAX_NAME_LENGTH = 100
 FILE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,99}\.(vhd|vhdl)$", re.I)
 VHDL_IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
 STOP_TIME_RE = re.compile(r"^(\d+(?:\.\d+)?)\s?(fs|ps|ns|us|ms|sec)$")
@@ -72,6 +78,11 @@ def validate_request(files, top, stop_time=None):
     for f in files or []:
         name = f["name"] if isinstance(f, dict) else getattr(f, "name", None)
         content = f["content"] if isinstance(f, dict) else getattr(f, "content", None)
+        # Windows editors (e.g. Notepad) may start a file with a UTF-8 "BOM"
+        # mark, which GHDL rejects ("UTF-8 BOM detected"). It is not part of
+        # the VHDL, so drop it. Found by error-guessing testing (Milestone 5).
+        if isinstance(content, str) and content.startswith("\ufeff"):
+            content = content[1:]
         normalised.append((name, content))
 
     if not normalised:
@@ -81,7 +92,8 @@ def validate_request(files, top, stop_time=None):
 
     seen = set()
     for name, content in normalised:
-        if not isinstance(name, str) or not FILE_NAME_RE.match(name):
+        if (not isinstance(name, str) or not FILE_NAME_RE.match(name)
+                or len(name) > MAX_NAME_LENGTH):
             raise JobValidationError(
                 f"Invalid file name {name!r}. Use letters, digits, _ . - "
                 "and end in .vhd or .vhdl (no folders).")
@@ -104,9 +116,27 @@ def validate_request(files, top, stop_time=None):
     if not m:
         raise JobValidationError(
             f"Invalid stop_time {stop_time!r}. Examples: 100ns, 1us, 2 ms.")
-    stop_time = m.group(1) + m.group(2)       # GHDL wants no space: "100ns"
+    stop_time = _whole_stop_time(m.group(1), m.group(2))   # e.g. "100ns"
 
     return normalised, top, stop_time
+
+
+_TIME_UNITS = ["sec", "ms", "us", "ns", "ps", "fs"]     # each 1000x smaller
+
+
+def _whole_stop_time(value, unit):
+    """GHDL only accepts a whole number ("bad unit for '1.5ns'"), so a decimal
+    is moved to a smaller unit: 1.5ns -> 1500ps. Found by equivalence
+    partition testing: decimals passed validation and then failed in GHDL."""
+    number = Decimal(value)
+    i = _TIME_UNITS.index(unit)
+    while number != number.to_integral_value() and i < len(_TIME_UNITS) - 1:
+        number *= 1000
+        i += 1
+    if number != number.to_integral_value():
+        raise JobValidationError(
+            f"stop_time {value}{unit} is finer than 1 fs, GHDL's smallest step.")
+    return f"{int(number)}{_TIME_UNITS[i]}"
 
 
 # ------------------------------------------------------- analysis order
@@ -145,8 +175,12 @@ def analysis_order(files):
     needs = [{unit_file[u] for u in used if u in unit_file} - {i}
              for i, used in enumerate(uses)]
 
+    # LOOP INVARIANT: every file in `ordered` comes after every file it
+    # needs, and `done` is exactly the set of files in `ordered`.
     ordered, done = [], set()
+    check_order_invariant(ordered, needs)               # establishment
     while len(ordered) < len(files):
+        remaining = len(files) - len(ordered)           # termination measure
         ready = [i for i in range(len(files))
                  if i not in done and needs[i] <= done]
         if not ready:                                   # a loop: give up
@@ -155,7 +189,16 @@ def analysis_order(files):
             break
         ordered.append(ready[0])
         done.add(ready[0])
-    return [files[i] for i in ordered]
+        check_order_invariant(ordered, needs)           # preservation
+        assert done == set(ordered)
+        check_progress(remaining, len(files) - len(ordered))  # termination
+    else:
+        # EXIT: the loop ended because every file is placed, so by the
+        # invariant the whole list is in dependency order.
+        check_order_invariant(ordered, needs)
+    result = [files[i] for i in ordered]
+    check_same_files(files, result)
+    return result
 
 
 # ------------------------------------------------------------- docker helpers
@@ -191,6 +234,7 @@ def _truncate(text, limit=None):
     the line that explains a failure (e.g. an assertion of severity failure)
     is usually the last one, after thousands of report notes."""
     limit = limit or config.MAX_LOG_CHARS
+    assert isinstance(text, str) and limit > 0      # programmer assumption
     if len(text) <= limit:
         return text
     head = limit // 2
@@ -207,6 +251,10 @@ def _std_flag():
 
 def _run_stage(client, job_id, job_dir, stage, command, timeout_s):
     """Run one command in a fresh, locked-down container. Always removes it."""
+    # Programmer assumptions (preconditions). run_job() always calls this
+    # with a whole command and a positive time limit.
+    assert command and all(isinstance(part, str) for part in command), command
+    assert timeout_s > 0
     started = time.monotonic()
     timed_out = False
     oom_killed = False
@@ -276,6 +324,9 @@ def _run_stage(client, job_id, job_dir, stage, command, timeout_s):
 
 
 def _make_job_dir(job_id, files):
+    # Programmer assumption: the files were already validated, so the names
+    # are safe and unique (validate_request() rejects anything else).
+    assert files and len({n.lower() for n, _ in files}) == len(files)
     config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job_dir = config.JOBS_DIR / job_id
     job_dir.mkdir()
@@ -321,14 +372,21 @@ def run_job(files, top, stop_time=None, job_id=None, client=None,
 
     try:
         files, top, stop_time = validate_request(files, top, stop_time)
+        # Postcondition of validate_request(), assumed by everything after it.
+        assert 1 <= len(files) <= config.MAX_FILES
     except JobValidationError as e:
         result.update(error="validation_error", message=str(e))
+        check_result(result, config.MAX_LOG_CHARS)
         return result
 
     with _job_slots:
-        return _run_validated_job(result, files, top, stop_time, client,
-                                  timeout_s or config.JOB_TIMEOUT_S,
-                                  keep_job_dir)
+        result = _run_validated_job(result, files, top, stop_time, client,
+                                    timeout_s or config.JOB_TIMEOUT_S,
+                                    keep_job_dir)
+    # Every result obeys the contract's rules, or the caller gets an
+    # InvariantError (HTTP 500) instead of a wrong answer.
+    check_result(result, config.MAX_LOG_CHARS)
+    return result
 
 
 def _run_validated_job(result, files, top, stop_time, client, timeout_s,
@@ -348,7 +406,12 @@ def _run_validated_job(result, files, top, stop_time, client, timeout_s,
                             f"--vcd={VCD_NAME}", f"--stop-time={stop_time}"]),
         ]
 
+        plan_names = [stage for stage, _ in plan]
+        # LOOP INVARIANT: the stages run so far are the first ones of the
+        # plan and all finished cleanly (any failure returns from the loop).
+        check_stage_loop(result["stages"], plan_names)          # establishment
         for stage, command in plan:
+            remaining = len(plan_names) - len(result["stages"])  # termination measure
             result["stage"] = stage
             info = _run_stage(client, job_id, job_dir, stage, command, timeout_s)
             result["stages"].append(info)
@@ -368,7 +431,12 @@ def _run_validated_job(result, files, top, stop_time, client, timeout_s,
                     f"{stage.capitalize()} failed (exit code "
                     f"{info['exit_code']}). See the stage output."))
                 return result
+            check_stage_loop(result["stages"], plan_names)      # preservation
+            check_progress(remaining, len(plan_names) - len(result["stages"]))
 
+        # EXIT: all three stages ran and, by the invariant, all were clean.
+        check_stage_loop(result["stages"], plan_names)
+        assert len(result["stages"]) == len(plan_names)
         vcd_path = job_dir / VCD_NAME
         if vcd_path.is_file():
             size = vcd_path.stat().st_size
@@ -396,6 +464,7 @@ def _run_validated_job(result, files, top, stop_time, client, timeout_s,
         return result
     finally:
         if job_dir is not None and not keep_job_dir:
+            check_inside(job_dir, config.JOBS_DIR)
             _remove_dir(job_dir)
 
 

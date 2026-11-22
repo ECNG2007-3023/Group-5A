@@ -218,3 +218,15 @@ def test_published_openapi_file_is_up_to_date():
     live = main.app.openapi()
     assert published["paths"].keys() == live["paths"].keys()
     assert published["components"]["schemas"] == live["components"]["schemas"]
+
+
+def test_client_closes_cleanly_as_a_context_manager():
+    """The client works in a `with` block and closes its connection after."""
+    def handler(request):
+        return httpx.Response(200, json={"status": "ok", "docker": "ok", "image": "present"})
+    http = httpx.Client(base_url="http://p5a", transport=httpx.MockTransport(handler))
+    with P5AClient(http=http) as p5a:
+        assert p5a.is_ready()
+    assert http.is_closed
+    assert P5AClient._body({"a.vhd": "x"}, "a", None) == {
+        "files": [{"name": "a.vhd", "content": "x"}], "top": "a"}
