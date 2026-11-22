@@ -4,8 +4,15 @@ What each automated test proves, and the latest result. Run everything with
 `python -m pytest -v -rs` (Docker Desktop running, image built). GitHub runs
 the same on every push and pull request.
 
-**Latest full run: 101 passed, 0 failed, 0 skipped** (real Docker, GHDL 4.1.0
-on Ubuntu 24.04, 4 Nov 2026). Live HTTP check `docker/m4_api_check.py`: 13/13.
+**Latest full run: 244 passed, 0 failed, 0 skipped** (real Docker, GHDL 4.1.0
+on Ubuntu 24.04, 19 Nov 2026). **Coverage: 99%** statement + branch
+(coverage.py). Live HTTP check `docker/m4_api_check.py`: 13/13, also against
+the combined P5A + P5B backend (Group-5B's `parent_main.py`).
+
+How each lecture technique (assertions, exceptions, invariants, white box,
+black box, test case write-ups) is applied, with the full EP/BVA tables,
+decision tables, state transitions, loop-invariant proofs and coverage
+figures: **[testing-techniques.md](testing-techniques.md)**.
 
 The "Requirement" column refers to contract v1
 ([hdl-service-contract-v1.md](hdl-service-contract-v1.md)). Add the matching
@@ -13,14 +20,75 @@ SRS IDs (FR-P5A-xx) from the team's SRS where the report needs them.
 
 ## Test files
 
-| File | Tests | Needs Docker | Level |
-| --- | --- | --- | --- |
-| `tests/test_docker_runner.py` | 43 | 7 of them | Unit (runner, with a fake Docker) + real-Docker checks |
-| `tests/test_api.py` | 12 | No | Unit (API, with a fake runner) |
-| `tests/test_analysis_order.py` | 7 | No | Unit (file dependency order) |
-| `tests/test_limits.py` | 18 | 16 of them | Resource limits, sandbox, stress, cleanup |
-| `tests/test_integration.py` | 21 | 12 of them | End to end over HTTP, contract conformance, client |
-| `docker/m4_api_check.py` | 13 scenarios | Yes, API running | Live system check over real HTTP |
+| File | Tests | Needs Docker | Level | Type |
+| --- | --- | --- | --- | --- |
+| `tests/test_docker_runner.py` | 43 | 7 of them | Unit (runner, with a fake Docker) + real-Docker checks | White box (36), black box (7 real-Docker) |
+| `tests/test_api.py` | 12 | No | Unit (API, with a fake runner) | White box |
+| `tests/test_analysis_order.py` | 7 | No | Unit (file dependency order) | White box |
+| `tests/test_invariants.py` | 40 | No | Unit: invariants (result, loop), assertions, exceptions | White box |
+| `tests/test_blackbox.py` | 83 | 25 of them | Equivalence partitions, boundary values, decision tables, state transitions, error guessing | Black box |
+| `tests/test_docker_failures.py` | 15 | No | Docker failing part-way (added after the coverage review) | White box |
+| `tests/test_paths.py` | 4 | No | Statement/branch/condition/path coverage of one function | White box |
+| `tests/test_limits.py` | 18 | 16 of them | Resource limits, sandbox, stress, cleanup | Black box (VHDL limits, stress), grey box (sandbox probes), white box (2) |
+| `tests/test_integration.py` | 22 | 12 of them | End to end over HTTP, contract conformance, client | Black box (end to end), white box (client, OpenAPI) |
+| `docker/m4_api_check.py` | 13 scenarios | Yes, API running | Live system check over real HTTP | Black box |
+
+## Testing approach
+
+**White-box testing** is written from the code: it knows how a function works
+and tests each branch and error path, replacing Docker or the runner with a
+fake so one part is tested on its own. Examples: `test_commands` checks the
+exact `ghdl -a/-e/-r` commands built; `test_every_container_is_locked_down`
+checks every limit passed to Docker; `test_analysis_order.py` covers each
+branch of `analysis_order()` (reordering, kept order, dependency loop,
+comments); `test_invariants.py` breaks each invariant on purpose.
+
+**Black-box testing** is written from the requirements (contract v1) only. It
+sends VHDL or HTTP requests in and checks what comes out, without knowing how
+the service works inside. Examples: every scenario in
+`test_simulate_end_to_end`, the memory hog and runaway testbench in
+`TestVhdlLimits`, and `docker/m4_api_check.py`, which talks to a running
+server exactly as P5B or P6B would.
+
+**Grey box**: the sandbox probes in `TestSandbox` run commands inside a real
+container (`id -u`, `touch /etc/x`, a fork bomb) and only look at the result,
+but need knowledge of the container set-up to know what to try.
+
+## Assertions, exceptions and invariants
+
+**Assertions** are checks that stop the program when something is not as
+expected. Every test is built from them (`assert r["error"] == "timeout"`),
+and some assert that an exception IS raised, e.g.
+`pytest.raises(JobValidationError)` for a bad file name.
+
+**Exceptions** are how the service reports a problem without crashing:
+
+| Exception | Raised when | What the client gets |
+| --- | --- | --- |
+| `JobValidationError` | bad file name, `top` or `stop_time`; too many or too large files | 400 `validation_error` |
+| `DockerException`, `ImageNotFound` | Docker not running, image not built | 503 `internal_error` |
+| `RequestValidationError` (FastAPI) | missing fields, wrong JSON types | 400 `validation_error` |
+| `InvariantError` | an invariant is broken (a bug in the service) | 500 `internal_error`, never a wrong result |
+| any other `Exception` | anything unexpected | 500 `internal_error` in the Result shape |
+| `P5AUnavailable` (client) | the service cannot be reached | raised to the calling program |
+
+**Invariants** are rules that must ALWAYS be true. They are checked inside the
+service on every job (`app/invariants.py`), not only in the tests. A broken
+rule raises `InvariantError`; a real exception is used instead of Python's
+`assert` because `assert` is switched off when Python runs with `-O`.
+
+| Invariant | Checked in | Tests |
+| --- | --- | --- |
+| A result has exactly the contract v1 fields and a job id | `check_result()`, every `run_job()` result | `test_broken_results_are_caught` |
+| `error` is empty exactly when `status` is `success`; a success has stage `done`, all three stages clean | `check_result()` | same |
+| Stages run in order (analysis, elaboration, simulation) and stop at the first failure | `check_result()` | same |
+| A failed job has no VCD and explains why; the error code matches the stage that failed | `check_result()` | same |
+| A rejected request starts no container | `check_result()` | same |
+| Stage output stays within the size limit | `check_result()` | same |
+| Only a folder directly inside `jobs/` is ever deleted | `check_inside()`, before every delete | `test_delete_refuses_a_folder_outside_jobs` |
+| Dependency ordering never adds, loses or changes a file | `check_same_files()`, in `analysis_order()` | `test_dependency_order_keeps_the_same_files` |
+| Every real outcome (success, every failure at every stage) obeys all of the above | `run_job()` | `test_every_runner_outcome_obeys_the_rules` (10 cases) |
+| A broken invariant gives HTTP 500 and the job folder is still removed | `main.py` handler + `finally` | `test_broken_result_becomes_500_and_job_folder_is_still_removed` |
 
 ## What is proven
 
@@ -76,7 +144,7 @@ SRS IDs (FR-P5A-xx) from the team's SRS where the report needs them.
 | Browser front end (P6B) may call the API (CORS) | `test_browser_front_end_allowed_by_cors` | Pass |
 | Published OpenAPI schema matches the real API | `test_published_openapi_file_is_up_to_date`, `test_openapi_lists_contract_endpoints` | Pass |
 | Python client works and reports a down service clearly | `test_client_*` (3) | Pass |
-| P5B language server integration | See [p5b-integration.md](p5b-integration.md) | **Pending: P5B not built yet** |
+| P5B language server integration: one backend, FR-P5-01, FR-P5-02 | Group-5B `tests/test_combined.py` (14), see [p5b-integration.md](p5b-integration.md) | Pass |
 
 ## Bugs found by Milestone 5 testing (fixed)
 

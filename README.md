@@ -26,13 +26,16 @@ API format: [docs/hdl-service-contract-v1.md](docs/hdl-service-contract-v1.md)
 | --- | --- |
 | `python -m pytest` | All tests. Real-Docker tests are skipped (not failed) if Docker is not running or the image is not built; `-rs` shows why |
 | `python -m pytest tests/test_limits.py -v` | Milestone 5: memory, process, network, file-system and time limits on real containers, huge output, 8 jobs in parallel, cleanup |
+| `python -m pytest tests/test_invariants.py -v` | Invariants checked inside the service on every job, each broken on purpose |
+| `python -m pytest tests/test_blackbox.py -v` | Black box: equivalence partitions, boundary values, decision tables, state transitions, error guessing |
+| `python -m coverage run -m pytest` then `python -m coverage report` | White box: statement + branch coverage (99%) |
 | `python -m pytest tests/test_integration.py -v` | Milestone 5: whole service end to end over HTTP, every reply checked against contract v1 |
 | `python docker/m4_api_check.py` | With the API running: sends 13 real requests (success, every error type, runaway job, memory hog, bad requests, VCD download) and prints PASS/FAIL |
 | `python docker/m3_demo.py` | Runs jobs through the runner directly, without the API |
 
 GitHub runs all of this on every push and pull request
 (`.github/workflows/tests.yml`), so a red X on a PR means something broke.
-What each test proves: [docs/test-plan.md](docs/test-plan.md).
+What each test proves: [docs/test-plan.md](docs/test-plan.md). How the lecture techniques are applied: [docs/testing-techniques.md](docs/testing-techniques.md).
 
 ## Use it from another project (P5B, P6B)
 
@@ -54,6 +57,7 @@ P5B notes: [docs/p5b-integration.md](docs/p5b-integration.md).
 | `app/models.py` | Request and result shapes |
 | `app/docker_runner.py` | Runs each stage in an isolated container, classifies failures |
 | `app/config.py` | Limits (10 s per stage, 256 MB, 1 CPU, 4 jobs at once...), CORS origins; all overridable by environment variable |
+| `app/invariants.py` | Rules every result must obey, checked on every job |
 | `clients/p5a_client.py` | Python client for other teams |
 | `docker/Dockerfile` | The `p5a-ghdl` image (GHDL only, non-root user) |
 | `tests/` | Unit, limit and integration tests; `tests/ghdl/` holds the VHDL test files |

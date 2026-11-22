@@ -31,7 +31,7 @@ Interactive docs while the service runs: `http://127.0.0.1:8000/docs`
 
 | Field | Rule |
 | --- | --- |
-| `files` | 1 to 20 files, **in any order** (the service analyses them in dependency order: packages and entities before the files that use `work.<name>`). `name`: letters, digits, `_ . -`, ends in `.vhd` or `.vhdl`, no folders, no duplicates. `content`: not empty, at most 200,000 bytes |
+| `files` | 1 to 20 files, **in any order** (the service analyses them in dependency order: packages and entities before the files that use `work.<name>`). `name`: at most 100 characters, letters, digits, `_ . -`, ends in `.vhd` or `.vhdl`, no folders, no duplicates. `content`: not empty, at most 200,000 bytes |
 | `top` | The entity to elaborate and run (normally the testbench). A VHDL identifier |
 | `stop_time` | Optional, default `1us`. A number and unit: `fs ps ns us ms sec` |
 

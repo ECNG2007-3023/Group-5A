@@ -25,7 +25,10 @@ jobs:
         run: docker build -t p5a-ghdl ./docker
 
       - name: Unit, limit and integration tests
-        run: python -m pytest -v -rs
+        run: python -m coverage run -m pytest -v -rs
+
+      - name: White-box coverage (statement + branch)
+        run: python -m coverage report
 
       - name: Live API check
         run: |

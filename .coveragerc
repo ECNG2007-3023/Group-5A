@@ -1,0 +1,13 @@
+# White-box coverage (statement + branch) with coverage.py:
+#   python -m coverage run -m pytest
+#   python -m coverage report -m        (or: python -m coverage html)
+[run]
+branch = True
+source = app, clients
+omit =
+    # Milestone 2 runner, replaced by docker_runner.py and not used by the
+    # service (nothing imports it). Left in the repo for the team to decide.
+    app/ghdl_runner.py
+
+[report]
+show_missing = True
